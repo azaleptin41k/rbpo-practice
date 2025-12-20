@@ -45,3 +45,9 @@ jobs:
         if: always()
         with:
           sarif_file: semgrep.sarif
+      - name: Archive SARIF report
+        uses: actions/upload-artifact@v4
+        if: always() # Выполнить, даже если сканирование найдет ошибки
+        with:
+          name: semgrep-report  # Имя будущего артефакта
+          path: semgrep.sarif   # Файл, который мы хотим сохранить
