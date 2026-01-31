@@ -1,0 +1,69 @@
+name: Java Build and SAST
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  secret-scan:
+      name: Gitleaks Secret Scan
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0 # Нужно для сканирования истории
+  
+        - name: Run Gitleaks
+          uses: gitleaks/gitleaks-action@v2
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            # Gitleaks автоматически упадет (exit code 1), если найдет секрет.
+            # Это выполняет требование "останавливать сборку".
+  # Этап 1: Сборка (из задания №2)
+  build:
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    container:
+      image: maven:3.9.6-eclipse-temurin-21
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Если тесты есть, они запустятся здесь. Если нет - просто сборка.
+      - name: Build with Maven
+        run: mvn clean package
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-jar
+          path: target/*.jar
+
+  # Этап 2: Тестирование безопасности (SAST) (из задания №3)
+  sast-scan:
+    name: Semgrep SAST Scan
+    runs-on: ubuntu-latest
+    needs: build # Ждем окончания сборки
+    container:
+      image: returntocorp/semgrep
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        # config=auto подберет правила сам. sarif для отчета.
+        run: semgrep scan --config=auto --sarif --output=semgrep.sarif
+
+      - name: Upload SARIF result
+        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+      - name: Archive SARIF report
+        uses: actions/upload-artifact@v4
+        if: always() # Выполнить, даже если сканирование найдет ошибки
+        with:
+          name: semgrep-report  # Имя будущего артефакта
+          path: semgrep.sarif   # Файл, который мы хотим сохранить
