@@ -1,0 +1,117 @@
+name: Build & Security Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Приложение уязвимо НАМЕРЕННО (учебный стенд), поэтому SAST и SCA работают
+# в режиме отчёта и не блокируют сборку. Блокирующая проверка — только поиск секретов.
+# Все actions закреплены по SHA коммита (защита от перезаписи тегов).
+
+jobs:
+  # ── 1. Secret Scan — блокирует пайплайн при найденном секрете ──────────
+  secret-scan:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # сканируем всю историю
+          persist-credentials: false
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2. Build ───────────────────────────────────────────────────────────
+  build:
+    name: Build (Maven)
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          java-version: "21"
+          distribution: temurin
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn -B clean package
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packaged-jar
+          path: target/*.jar
+
+  # ── 3. SAST — Semgrep (отчёт в GitHub Security) ────────────────────────
+  sast-scan:
+    name: SAST (Semgrep)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run Semgrep
+        run: semgrep scan --config=p/java --config=p/owasp-top-ten --sarif --output=semgrep.sarif || true
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Archive SARIF report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: semgrep-report
+          path: semgrep.sarif
+
+  # ── 4. SCA — OWASP Dependency-Check ────────────────────────────────────
+  # Нужен секрет репозитория NVD_API_KEY (бесплатно: nvd.nist.gov/developers/request-an-api-key)
+  dependency-check:
+    name: SCA (OWASP Dependency-Check)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          java-version: "21"
+          distribution: temurin
+          cache: maven
+
+      - name: Run Dependency-Check
+        run: >
+          mvn -B org.owasp:dependency-check-maven:check
+          -Dformat=ALL
+          -DsuppressionFile=suppression.xml
+          -DnvdApiKey=${{ secrets.NVD_API_KEY }}
+
+      - name: Upload SCA report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dependency-check-report
+          path: target/dependency-check-report.*
